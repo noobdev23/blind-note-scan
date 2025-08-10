@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Indian Currency Detector (Accessible)</title>
+<style>
+  :root { --bg: #071013; --card: #0b1d25; --accent: #00e676; --text: #e6f7ef; }
+  body { margin:0; font-family: system-ui, -apple-system, Roboto, 'Segoe UI', Arial; background:var(--bg); color:var(--text); display:flex; align-items:center; justify-content:center; min-height:100vh; }
+  .wrap{ width:100%; max-width:760px; padding:18px; box-sizing:border-box; }
+  header{ display:flex; align-items:center; gap:12px; }
+  h1{ margin:0; font-size:20px; }
+  .controls{ margin-top:12px; display:flex; gap:8px; flex-wrap:wrap; }
+  button, label.inputfile{ background:var(--card); color:var(--text); border:1px solid rgba(255,255,255,0.04); padding:10px 12px; border-radius:8px; cursor:pointer; }
+  input[type=file]{ display:none; }
+  video{ width:100%; max-height:360px; border-radius:10px; margin-top:12px; background:#000; border:2px solid rgba(0,0,0,0.4); }
+  .status{ margin-top:10px; padding:12px; background:linear-gradient(90deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); border-radius:8px; }
+  .result{ font-size:20px; font-weight:700; margin-top:8px; }
+  .small{ font-size:13px; opacity:0.8; }
+  footer{ margin-top:14px; font-size:13px; opacity:0.8; }
+  .hc{ background:black; color:white; border:2px solid yellow; padding:6px; border-radius:6px; }
+</style>
+</head>
+<body>
+  <div class="wrap" role="main">
+    <header>
+      <div style="display:flex;flex-direction:column;">
+        <h1>Indian Currency Detector</h1>
+        <div class="small">Accessible — voice feedback for blind users. Works offline in-browser (heuristic).</div>
+      </div>
+    </header>
+
+    <div class="controls" aria-hidden="false">
+      <button id="camBtn" aria-pressed="false">Start Camera</button>
+      <label class="inputfile" for="file">Upload Image</label>
+      <input id="file" type="file" accept="image/*" aria-label="Upload currency image" />
+      <button id="detectBtn">Detect</button>
+      <button id="hcBtn" class="hc">High Contrast</button>
+      <button id="voiceBtn">Voice: ON</button>
+    </div>
+
+    <video id="video" playsinline autoplay muted aria-label="Camera preview"></video>
+    <canvas id="canvas" style="display:none"></canvas>
+
+    <div class="status" aria-live="polite">
+      <div id="msg">Ready — start camera or upload an image.</div>
+      <div class="result" id="res" aria-atomic="true">Result: —</div>
+    </div>
+
+    <footer>
+      Tip: Hold the note centered and well-lit. If detection fails, try a different angle or upload a clear photo.
+    </footer>
+  </div>
+
+<script>
+// Accessibility + helper utilities
+const msgEl = document.getElementById('msg');
+const resEl = document.getElementById('res');
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const fileInput = document.getElementById('file');
+const camBtn = document.getElementById('camBtn');
+const detectBtn = document.getElementById('detectBtn');
+const hcBtn = document.getElementById('hcBtn');
+const voiceBtn = document.getElementById('voiceBtn');
+
+let stream = null;
+let voiceOn = true;
+let highContrast = false;
+
+function updateMsg(t){ msgEl.textContent = t; }
+function updateRes(t){ resEl.textContent = 'Result: ' + t; if(voiceOn) speak(t); }
+
+function speak(text){
+  if(!voiceOn || !('speechSynthesis' in window)) return;
+  try{
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'en-IN';
+    window.speechSynthesis.speak(u);
+  }catch(e){ console.warn('speak failed', e); }
+}
+
+// Camera control
+async function startCamera(){
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+    video.srcObject = stream;
+    camBtn.textContent = 'Stop Camera';
+    camBtn.setAttribute('aria-pressed','true');
+    updateMsg('Camera started — position the note and press Detect.');
+  }catch(e){
+    updateMsg('Camera not available or permission denied.');
+  }
+}
+
+function stopCamera(){
+  if(stream){
+    stream.getTracks().forEach(t=>t.stop());
+    stream = null;
+  }
+  video.srcObject = null;
+  camBtn.textContent = 'Start Camera';
+  camBtn.setAttribute('aria-pressed','false');
+  updateMsg('Camera stopped.');
+}
+
+// Heuristic detection (color + center sampling)
+function detectFromCanvas(c){
+  const ctx = c.getContext('2d');
+  const w = c.width, h = c.height;
+  // sample center box
+  const sx = Math.floor(w*0.25), sy = Math.floor(h*0.25), sw = Math.floor(w*0.5), sh = Math.floor(h*0.5);
+  let data;
+  try{ data = ctx.getImageData(sx, sy, sw, sh).data; } catch(e){ return 'Unable to sample image'; }
+  let r=0,g=0,b=0,count=0;
+  for(let i=0;i<data.length;i+=4){
+    const alpha = data[i+3];
+    if(alpha < 40) continue;
+    r += data[i]; g += data[i+1]; b += data[i+2]; count++;
+  }
+  if(count === 0) return 'No visible pixels';
+  r = r/count; g = g/count; b = b/count;
+  // compute hue & saturation (approx)
+  const mx = Math.max(r,g,b), mn = Math.min(r,g,b);
+  const delta = mx - mn;
+  let hue = 0;
+  if(delta !== 0){
+    if(mx === r) hue = ((g - b) / delta) % 6;
+    else if(mx === g) hue = ((b - r) / delta) + 2;
+    else hue = ((r - g) / delta) + 4;
+    hue = Math.round(hue * 60);
+    if(hue < 0) hue += 360;
+  }
+  const sat = mx ? (delta / mx) : 0;
+  const brightness = (r+g+b)/3;
+
+  // Heuristic rules (approximate): tuned for modern Indian notes
+  // 2000: pink/magenta (hue ~ 300-360 or 0-20), high sat
+  if((hue >= 300 || hue <= 20) && sat > 0.14 && brightness > 80) return '₹2000 (likely)';
+  // 500: grayish (low sat, medium brightness)
+  if(sat < 0.12 && brightness > 90) return '₹500 (likely)';
+  // 200: bright orange/yellow (hue ~ 20-60)
+  if(hue >= 20 && hue <= 60 && sat > 0.18) return '₹200 (likely)';
+  // 100: purple (hue ~ 250-300)
+  if(hue >= 250 && hue <= 300 && sat > 0.10) return '₹100 (likely)';
+  // 50 & 20: green family (hue ~ 80-160)
+  if(hue >= 80 && hue <= 160 && sat > 0.10) return '₹50 or ₹20 (green family)';
+  // 10: brownish/earth tones (lower brightness)
+  if(hue >= 10 && hue <= 50 && sat > 0.05 && brightness < 120) return '₹10 (likely)';
+  // fallback
+  return 'Unable to detect — try a clearer photo or different angle';
+}
+
+// Capture from video
+async function captureFromVideo(){
+  if(!video || !video.videoWidth) { updateMsg('Camera not ready'); return; }
+  canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
+// Handle file upload
+fileInput.addEventListener('change', async (e)=>{
+  const f = e.target.files && e.target.files[0];
+  if(!f) return;
+  const img = new Image();
+  img.onload = async ()=>{
+    canvas.width = img.width; canvas.height = img.height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    updateMsg('Image loaded — analyzing...');
+    const out = detectFromCanvas(canvas);
+    updateRes(out);
+  };
+  img.onerror = ()=> updateMsg('Could not read image file');
+  img.src = URL.createObjectURL(f);
+});
+
+// Detect button (from camera or image)
+detectBtn.addEventListener('click', async ()=>{
+  updateMsg('Detecting...');
+  if(stream){
+    await captureFromVideo();
+    const out = detectFromCanvas(canvas);
+    updateRes(out);
+  } else {
+    updateMsg('No camera active. Upload an image or start camera.');
+  }
+});
+
+// Camera toggle
+camBtn.addEventListener('click', ()=>{
+  if(stream) stopCamera(); else startCamera();
+});
+
+// High contrast toggle
+hcBtn.addEventListener('click', ()=>{
+  highContrast = !highContrast;
+  if(highContrast){
+    document.documentElement.style.background = '#fff';
+    document.documentElement.style.color = '#000';
+    document.body.style.background = '#fff';
+    document.body.style.color = '#000';
+    hcBtn.textContent = 'Normal Contrast';
+  } else {
+    document.documentElement.style.background = '';
+    document.documentElement.style.color = '';
+    document.body.style.background = '';
+    document.body.style.color = '';
+    hcBtn.textContent = 'High Contrast';
+  }
+});
+
+// Voice toggle
+voiceBtn.addEventListener('click', ()=>{
+  voiceOn = !voiceOn;
+  voiceBtn.textContent = voiceOn ? 'Voice: ON' : 'Voice: OFF';
+  if(voiceOn) speak('Voice turned on');
+});
+
+// Keyboard accessibility: Enter on buttons triggers them
+[camBtn, detectBtn, hcBtn, voiceBtn].forEach(b=>{
+  b.addEventListener('keyup', (e)=>{ if(e.key==='Enter') b.click(); });
+});
+
+// Prevent accidental sleep for users: friendly note
+updateMsg('Ready — start camera or upload an image. Press Detect to identify the note.');
+
+// Clean up on unload
+window.addEventListener('beforeunload', ()=>{ if(stream) stopCamera(); });
+
+</script>
+</body>
+</html>
